@@ -1,0 +1,78 @@
+name: build
+
+# 手动点一下就跑，或者打 tag（v0.2.0-beta.1）时自动跑并附到 Release 上。
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  package:
+    name: 打包 ${{ matrix.label }}
+    strategy:
+      # 一个平台失败不影响另一个继续出包
+      fail-fast: false
+      matrix:
+        include:
+          # Windows：免安装 exe
+          - os: windows-latest
+            label: windows-x64
+            args: --win portable
+          # macOS：dmg + zip。用 macos-13（Intel）是因为配置里打的是 x64 包；
+          # 想直接出 Apple Silicon 原生包，把 os 换成 macos-latest、arch 改成 arm64，
+          # 并且必须处理签名（未签名的 arm64 二进制在 macOS 上根本起不来）。
+          - os: macos-13
+            label: macos-x64
+            args: --mac dmg zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 仓库里没提交 package-lock.json，所以用 install 而不是 ci
+      - name: 安装依赖
+        run: npm install --no-audit --no-fund
+
+      - name: 构建前端
+        run: npm run build
+
+      - name: 打包
+        run: node node_modules/electron-builder/cli.js ${{ matrix.args }} --publish never
+        env:
+          # 没配证书时明确跳过签名，别让 electron-builder 去满世界找钥匙串
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: moka-${{ matrix.label }}
+          if-no-files-found: error
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.zip
+            release/*.blockmap
+
+  release:
+    # 只有打 tag 才发 Release；手动触发只留 artifact
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          # v0.2.0-beta.1 这类带前缀的 tag 自动标为预发布，不会顶掉 Latest
+          prerelease: ${{ contains(github.ref_name, '-') }}

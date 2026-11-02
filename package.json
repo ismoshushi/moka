@@ -1,0 +1,87 @@
+{
+  "name": "moka",
+  "private": true,
+  "version": "0.2.0-beta.1",
+  "description": "Moka — 用一句自然语言，让你的大模型亲手操作 Chrome 和安卓手机",
+  "license": "Apache-2.0",
+  "author": "Moka contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ismoshushi/moka.git"
+  },
+  "homepage": "https://github.com/ismoshushi/moka#readme",
+  "bugs": {
+    "url": "https://github.com/ismoshushi/moka/issues"
+  },
+  "keywords": [
+    "ai-agent",
+    "electron",
+    "android",
+    "adb",
+    "chrome-devtools-protocol",
+    "computer-use",
+    "llm"
+  ],
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "node node_modules/vite/bin/vite.js build",
+    "start": "node scripts/start.mjs",
+    "pack": "npm run build && node node_modules/electron-builder/cli.js --dir",
+    "dist": "npm run build && node node_modules/electron-builder/cli.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  },
+  "build": {
+    "appId": "xyz.moshushi.desktop.moka",
+    "productName": "Moka",
+    "artifactName": "${name}-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**",
+      "dist/**",
+      "build/icon.png",
+      "LICENSE",
+      "NOTICE"
+    ],
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        "portable"
+      ]
+    },
+    "mac": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "public.app-category.developer-tools",
+      "identity": null
+    }
+  }
+}

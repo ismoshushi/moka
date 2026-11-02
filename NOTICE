@@ -1,0 +1,65 @@
+Moka
+Copyright 2026 Moka contributors
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full text.
+
+--------------------------------------------------------------------------------
+Third-party components
+--------------------------------------------------------------------------------
+
+运行时依赖：
+
+  Electron 33            MIT License        https://github.com/electron/electron
+  React 18 / ReactDOM 18 MIT License        https://github.com/facebook/react
+  ws                     MIT License        https://github.com/websockets/ws
+
+构建与开发依赖：
+
+  Vite 5                 MIT License        https://github.com/vitejs/vite
+  @vitejs/plugin-react   MIT License        https://github.com/vitejs/vite-plugin-react
+  electron-builder 25    MIT License        https://github.com/electron-userland/electron-builder
+  TypeScript 5           Apache-2.0         https://github.com/microsoft/TypeScript
+
+完整的依赖树及其许可证可通过以下命令生成：
+
+    npx license-checker --summary
+
+--------------------------------------------------------------------------------
+来源说明
+--------------------------------------------------------------------------------
+
+参考项目：
+
+  Mika  https://github.com/wangzan101/Mika
+  Apache License 2.0, Copyright 2026 wangzan101
+
+Moka 的产品思路与交互形态参考了 Mika（Android 端，用自然语言驱动手机）。
+两者实现相互独立，代码层面的关系需按层区分：
+
+  · 上游 Mika 的 core/（自行实现的 ADB 协议栈 SPAKE2 + TLS、无障碍读屏、
+    提示词与知识库）未被复制、修改或引入 Moka。
+
+  · Moka 的通道层（electron/lib/web.js、electron/lib/phone.js）由本项目作者
+    自己早前的桌面原型 mika-desktop（Kotlin）中的 desktop/ 模块翻译而来。该
+    原型模块为独立编写：调用系统 adb 命令行操作手机、用 Chrome DevTools
+    Protocol 操作浏览器，不含 Mika 上游 core/ 的代码。原型模块虽然依赖了
+    Mika 的 core 模块，但引用范围仅限模型层的数据类型与 OpenAI 兼容客户端
+    （Message / Part / ChatModel / OpenAiCompatModel 等），未使用 core 的
+    协议实现、Agent 循环、提示词与知识库；Moka 移植的四个文件
+    （Cdp.kt / WebBackend.kt / PhoneBackend.kt / Storage.kt）对 core 零引用。
+
+  · 首启会读取旧桌面原型留下的 ~/.mika/state.json 并搬迁到 ~/.moka。该文件是
+    原型自己定义的缓存格式（Storage.kt 的 PersistedState），并非 Mika 上游
+    安卓端的数据格式，与 Mika 无代码或数据格式上的依赖。
+
+Mika 及其相关名称的著作权归其作者所有。若后续引入 Mika 的任何代码或资源，
+将在此逐项列出，并遵守其许可证条款。
+
+--------------------------------------------------------------------------------
+说明
+--------------------------------------------------------------------------------
+
+本项目通过 Chrome DevTools Protocol 与 Android Debug Bridge (adb) 与本机浏览器、
+用户自己的安卓设备通信，未包含任何来自 Chrome、Android 或第三方 App 的代码或资源。
+"Chrome"、"Android" 等名称归其各自所有者所有，本项目与 Google LLC 无隶属关系。

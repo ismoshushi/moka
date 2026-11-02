@@ -1,0 +1,16 @@
+node_modules/
+dist/
+release/
+*.log
+
+# 本地缓存、演示数据、文档截图脚本的中间产物
+.cache/
+
+# 运行时产物：里面有 API Key 和你的会话记录，千万别提交
+*.tmp
+state.json
+.moka/
+
+# 作者本机的双击启动脚本，不进仓库
+run-prod.cmd
+启动 Moka.bat
