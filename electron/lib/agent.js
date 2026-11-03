@@ -15,10 +15,12 @@ const SYSTEM = `你是一个运行在 Windows 桌面上的个人 AI 助理，有
 不确定有哪些空间时，先 phone_apps(keyword='tencent', user=999) 看分身空间里装了什么。
 phone_read 读不到文字（返回「屏幕上看不到文字」）时——分身空间 App 就属于这种——改用 phone_shot 截图直接看屏幕，再按图上的位置点。
 phone_shot 返回里会写明「手机屏幕实际像素」和「你看到的图已缩到多少」，两个尺寸不一样时按它给的倍数换算成屏幕像素再点，不要把图上的坐标直接当屏幕坐标。
-phone_type 打不了中文：遇到中文它会返回「输入未执行」并给建议，别反复重试同一条命令，改用别的路径或把情况说明给用户。
+要给某人或某个群发一段文字（尤其是中文、或者在分身空间里），优先用 phone_send_text(text, user)：它把文字直接交给微信的分享面板，不点输入框、不经过输入法，中文照样能传。流程是 phone_send_text → 看附图点「发送给朋友」→ 在会话列表里点目标会话 → 确认发送。
+phone_type 只能保证「按键已注入」，不能保证「文字已上屏」，所以它每次都会附一张操作后的截图：必须看图确认输入框里真有字。如果它说这个空间没有输入法，就不要再用 phone_type，直接改用 phone_send_text。
 
 规则：
 - 每次只调用一个工具，看清结果再决定下一步；坐标按手机屏幕实际像素给。
+- 收件人和内容没确认清楚之前，不要动手点发送。用户没说清「发给谁」或「发什么」时，先问，别猜着往下试。
 - 调用过的工具返回失败、或返回「未执行」，别原样再调一次；先判断原因、换个做法。
 - 网页操作前先确认要操作哪个已连接的网站；点不动时用 web_read 看看页面结构再换选择器。
 - 任务完成、或无法继续时，调用 done(answer) 给出最终答复，answer 用中文、简短、直接。`
@@ -103,8 +105,25 @@ const TOOLS = [
     function: {
       name: 'phone_type',
       description:
-        '向手机当前焦点输入框输入文字。只支持英文、数字、半角符号；中文等非 ASCII 字符会失败并返回处理建议',
+        '向手机当前焦点输入框输入文字。只支持英文、数字、半角符号；中文等非 ASCII 字符会失败并返回处理建议。发消息请优先用 phone_send_text',
       parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'phone_send_text',
+      description:
+        '把一段文字直接交给微信分享面板（走系统分享 Intent，不点输入框、不过输入法，中文照样能传）。给某人或某个群发一段固定文字时用它，比 phone_tap + phone_type 可靠',
+      parameters: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: '要发送的完整文字' },
+          user: { type: 'integer', description: '0 或省略 = 主空间；999 = 分身空间（发到分身微信就传 999）' },
+          app: { type: 'string', description: '目标包名，默认 com.tencent.mm' },
+        },
+        required: ['text'],
+      },
     },
   },
   {
@@ -322,6 +341,11 @@ class Agent {
         return this.phone.tap(Number(args.x) || 0, Number(args.y) || 0)
       case 'phone_type':
         return this.phone.type(args.text)
+      case 'phone_send_text':
+        return this.phone.sendText(String(args.text || ''), {
+          app: String(args.app || 'com.tencent.mm'),
+          user: Number(args.user) || 0,
+        })
       case 'phone_read':
         return this.phone.readScreen()
       case 'phone_shot':

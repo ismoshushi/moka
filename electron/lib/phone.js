@@ -337,17 +337,29 @@ class PhoneChannel {
 
   /**
    * 输入文字。
-   * 中文等非 ASCII 走两条路：
-   *   1) 装了 ADBKeyBoard → 临时切到它、用 base64 广播上屏、再切回原输入法（无副作用）；
-   *   2) 没装 → 本地拦截并说明原因，绝不把中文塞给 adb。
+   * 三层判断，顺序不能换：
+   *   0) 这个空间有没有输入法——没有的话按键注入进去会被系统直接丢掉，命令却返回成功；
+   *   1) 装了 ADBKeyBoard → 临时切过去、base64 广播上屏、再切回原输入法；
+   *   2) 没装且含中文 → 本地拦截，绝不把中文塞给 adb（会 NPE）。
+   * 末尾一律截图回传：adb 只能保证「按键已注入」，不能保证「文字已上屏」。
    */
   async type(text) {
     const raw = String(text ?? '')
     if (!raw) return '没有可输入的文字'
 
+    const fg = await this.foreground()
+    if (!(await this.imeAvailable(fg.user))) {
+      return (
+        `打字未执行：${fg.user ? `当前界面在分身空间（user ${fg.user}）` : '当前空间'}` +
+        '里没有任何可用输入法，输入框弹不出键盘，按键注入进去会被系统直接丢掉，打多少都是空的。\n' +
+        '改用 phone_send_text 把文字直接交给微信分享——那条路走 Intent，不经过输入框，中文也能传。\n' +
+        '（根因在手机侧：分身空间的输入法要在分身里单独启用一次。）'
+      )
+    }
+
     if (!ASCII_ONLY.test(raw) && (await this.hasAdbKeyboard())) {
       const done = await this.typeViaAdbKeyboard(raw)
-      if (done) return done
+      if (done) return this.tipAfterType(done)
     }
 
     if (!ASCII_ONLY.test(raw)) {
@@ -357,17 +369,90 @@ class PhoneChannel {
         'adb 自带的 input text 只支持英文、数字和半角符号，中文会让手机端直接抛',
         'NullPointerException（日志里那条 Attempt to get length of null array 就是它），一个字都进不去。',
         '可以这样处理：',
-        '1) 让用户自己手动敲这段文字，最稳；',
-        '2) 换个不需要中文输入的路径完成同样的事，比如用英文名、包名或拼音关键词搜索；',
-        '3) 用户在手机上装 ADBKeyBoard（github.com/senzhk/ADBKeyBoard）后重试，这个通道会自动改走广播，中文就能上屏。',
+        '1) 用 phone_send_text —— 走系统分享，中文照样传，不需要输入法，发文字消息优先用它；',
+        '2) 让用户自己手动敲这段文字，最稳；',
+        '3) 用户在手机上装 ADBKeyBoard（github.com/senzhk/ADBKeyBoard）后重试，这个通道会自动改走广播。',
       ].join('\n')
     }
 
     // 纯 ASCII：空格要写成 %s，其余字符靠单引号交给设备端 shell
     const payload = raw.replace(/ /g, '%s')
     const out = await this.adb(['shell', 'input', 'text', shellArg(payload)])
-    if (/Exception|Error|Unknown/i.test(out)) return `输入失败：${out}`
-    return `已输入：${raw}`
+    if (/Exception|Error|Unknown/i.test(out)) return `输入失败：${out.split('\n')[0]}`
+    return this.tipAfterType(`已发送按键：${raw}`)
+  }
+
+  /**
+   * 把一段文字通过系统分享直接交给 App（默认微信），绕开输入框和键盘。
+   * 为什么要这条路径：分身空间里可能一个输入法都没有，input text 注入的按键会被
+   * 直接丢弃、输入框始终空白；而 ACTION_SEND 把文字塞进 Intent extra，不经过任何
+   * 输入法，中文也照传。
+   */
+  async sendText(text, { app = 'com.tencent.mm', user = 0 } = {}) {
+    const t = String(text ?? '').trim()
+    if (!t) return '没有要发送的文字'
+    const u = Number(user) || 0
+    const args = ['shell', 'am', 'start']
+    if (u) args.push('--user', String(u))
+    args.push(
+      '-a', 'android.intent.action.SEND',
+      '-t', 'text/plain',
+      '--es', 'android.intent.extra.TEXT', shellArg(t),
+    )
+    if (app) args.push('-p', app)
+    const out = await this.adb(args, { timeout: 25000 })
+    if (/Error|Exception|unable to resolve|does not exist/i.test(out)) {
+      return `分享没打开：${out.split('\n')[0]}\n（可能这台机没装 ${app}，或这个空间里没有它）`
+    }
+    await sleep(1500)
+    const tip =
+      `已把 ${t.length} 个字的文字交给分享面板（走 Intent，没经过输入框和输入法）。\n` +
+      '下一步看附图：点「发送给朋友」→ 在会话列表里选目标 → 确认发送。\n' +
+      `文字内容：${t}`
+    const img = await this.screencap()
+    return img ? { __image: img, __mime: 'image/png', __text: tip } : tip
+  }
+
+  /** 输入类操作后统一补一张图，让模型自己确认「文字到底上屏没有」 */
+  async tipAfterType(msg) {
+    await sleep(800)
+    const tip =
+      `${msg}\n` +
+      'adb 只保证「按键已注入」，不保证「文字已上屏」。下面这张是操作后的画面，' +
+      '请确认输入框里真的出现了这段文字；如果还是空的，说明这个界面没接收按键——' +
+      '再点一次输入框、或者改用 phone_send_text，别原样重打。'
+    const img = await this.screencap()
+    return img ? { __image: img, __mime: 'image/png', __text: tip } : tip
+  }
+
+  /** 当前前台窗口属于哪个用户空间（分身是 user 999）——从 mCurrentFocus 里能直接读到 */
+  async foreground() {
+    const out = await this.adb(['shell', 'dumpsys', 'window'], { timeout: 25000 })
+    const m = out.match(/mCurrentFocus=Window\{\w+ u(\d+) ([^\s}]+)/)
+    if (!m) return { user: 0, pkg: '' }
+    return { user: Number(m[1]), pkg: m[2].split('/')[0] }
+  }
+
+  /**
+   * 这个用户空间里有没有可用输入法。
+   * 分身空间（user 999）通常一个都没有——用户只能在主空间装输入法，
+   * 分身要单独启用。`ime list -s --user 999` 返回空就是这种情况。
+   * 命令本身不可用（机型不支持 --user）时返回 true，宁可放行也不要误拦。
+   */
+  async imeAvailable(user = 0) {
+    const u = Number(user) || 0
+    const raw = async (args) => {
+      const s = await this.adb(args, { timeout: 15000 })
+      if (/error|exception|unknown option/i.test(s)) return null
+      return s.split('\n').map((l) => l.trim()).filter((l) => l && l.includes('/')).length
+    }
+    const n = await raw(['shell', 'ime', 'list', '-s', ...(u ? ['--user', String(u)] : [])])
+    if (n === null) return true
+    if (n > 0) return true
+    if (!u) return false
+    // 分身空间空：再确认命令本身没坏（主空间也列不出来 = 命令不可用，放行）
+    const base = await raw(['shell', 'ime', 'list', '-s'])
+    return base === null || base === 0
   }
 
   /** 手机里是否装了 ADBKeyBoard（结果缓存，避免每次都查包名） */

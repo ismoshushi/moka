@@ -175,7 +175,8 @@ Electron 主进程 ── ReAct 循环：想 → 调工具 → 看结果 → 再
 | `web_navigate` / `web_read` / `web_click` / `web_type` | 打开网址、读页面文字、点击元素、输入文本 |
 | `phone_launch` / `phone_apps` | 按包名启动 App（支持 `user=999` 分身空间）、按关键词列包名 |
 | `phone_read` / `phone_shot` | 读屏幕文字节点、截当前画面给模型看 |
-| `phone_tap` / `phone_type` | 按坐标点击、输入文本 |
+| `phone_tap` / `phone_type` | 按坐标点击、输入文本（只能英文数字；打不了中文会直说） |
+| `phone_send_text` | 把一段文字通过系统分享直接交给微信，不点输入框、不过输入法，中文也照传 |
 | `done` | 给出最终答复并结束 |
 
 手机截图在发给模型前会缩到宽 480 的 JPEG（约 40–60KB）。原始 PNG 有 600KB 左右，base64 之后既慢又贵。
