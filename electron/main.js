@@ -43,6 +43,8 @@ function persist() {
 /**
  * 给模型看的手机截图：缩到宽 480 的 JPEG。
  * 原始 PNG 约 600KB，base64 后 800KB，直接丢给模型既慢又贵；缩完约 40-60KB。
+ * 顺带把两套尺寸带回去：w/h 是屏幕实际像素（phone_tap 要按这个算），
+ * sentW/sentH 是模型真正看到的图有多大——不给这两个数，模型会拿图上坐标直接去点。
  */
 async function shrinkShot() {
   const b64 = await phone.screencap()
@@ -52,7 +54,15 @@ async function shrinkShot() {
     const size = img.getSize()
     if (!size.width) return { mime: 'image/png', data: b64 }
     const out = size.width > 480 ? img.resize({ width: 480 }) : img
-    return { mime: 'image/jpeg', data: out.toJPEG(72).toString('base64') }
+    const sent = out.getSize()
+    return {
+      mime: 'image/jpeg',
+      data: out.toJPEG(72).toString('base64'),
+      w: size.width,
+      h: size.height,
+      sentW: sent.width,
+      sentH: sent.height,
+    }
   } catch {
     return { mime: 'image/png', data: b64 }
   }

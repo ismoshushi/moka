@@ -8,15 +8,18 @@ const { PhoneChannel } = require('./phone')
 
 const SYSTEM = `你是一个运行在 Windows 桌面上的个人 AI 助理，有两套「手」：
 1) 网页通道（操作本机 Chrome）：web_navigate(url) 打开网址；web_read() 读页面可见文字；web_click(selector) 按 CSS 选择器点击；web_type(selector,text) 在输入框里打字。
-2) 手机通道（经 adb 操作已连的安卓手机）：phone_apps 查包名；phone_launch(app, user) 启动 App；phone_tap(x,y) 按像素坐标点击；phone_type(text) 输入文字（中文可能不上屏）；phone_read() 读当前屏幕文字。
+2) 手机通道（经 adb 操作已连的安卓手机）：phone_apps 查包名；phone_launch(app, user) 启动 App；phone_tap(x,y) 按屏幕实际像素点击；phone_type(text) 输入文字（只能英文数字半角符号）；phone_read() 读当前屏幕文字。
 
 关于「双开 / 分身」App：国产手机的双开不是换包名，而是多用户空间——同一个 com.tencent.mm 在主空间是主微信，在 user 999 是分身微信。
 用户说「分身微信 / 双开微信 / 另一个微信」时，必须 phone_launch(app='com.tencent.mm', user=999)；说主微信时 user 省略（默认 0）。
 不确定有哪些空间时，先 phone_apps(keyword='tencent', user=999) 看分身空间里装了什么。
 phone_read 读不到文字（返回「屏幕上看不到文字」）时——分身空间 App 就属于这种——改用 phone_shot 截图直接看屏幕，再按图上的位置点。
+phone_shot 返回里会写明「手机屏幕实际像素」和「你看到的图已缩到多少」，两个尺寸不一样时按它给的倍数换算成屏幕像素再点，不要把图上的坐标直接当屏幕坐标。
+phone_type 打不了中文：遇到中文它会返回「输入未执行」并给建议，别反复重试同一条命令，改用别的路径或把情况说明给用户。
 
 规则：
-- 每次只调用一个工具，看清结果再决定下一步；坐标按手机真实像素给。
+- 每次只调用一个工具，看清结果再决定下一步；坐标按手机屏幕实际像素给。
+- 调用过的工具返回失败、或返回「未执行」，别原样再调一次；先判断原因、换个做法。
 - 网页操作前先确认要操作哪个已连接的网站；点不动时用 web_read 看看页面结构再换选择器。
 - 任务完成、或无法继续时，调用 done(answer) 给出最终答复，answer 用中文、简短、直接。`
 
@@ -87,7 +90,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'phone_tap',
-      description: '点击手机屏幕坐标（像素）',
+      description: '点击手机屏幕坐标，x/y 必须是屏幕实际像素（不是截图缩放后的坐标）',
       parameters: {
         type: 'object',
         properties: { x: { type: 'integer' }, y: { type: 'integer' } },
@@ -99,7 +102,8 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'phone_type',
-      description: '向手机当前焦点输入框输入文字',
+      description:
+        '向手机当前焦点输入框输入文字。只支持英文、数字、半角符号；中文等非 ASCII 字符会失败并返回处理建议',
       parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
     },
   },
@@ -111,7 +115,8 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'phone_shot',
-      description: '截取手机当前画面并直接看图片。phone_read 读不到文字时（分身空间 App、纯图片界面）必须用它',
+      description:
+        '截取手机当前画面并直接看图片，返回里带屏幕实际像素尺寸。phone_read 读不到文字时（分身空间 App、纯图片界面）必须用它',
       parameters: { type: 'object', properties: {} },
     },
   },
@@ -280,7 +285,23 @@ class Agent {
           : '截图失败：手机已断开（adb 里看不到设备），请重新插线或用「连接手机」重连'
       )
     }
-    return { __image: s.data, __mime: s.mime || 'image/png', __text: '已截图（手机当前画面）' }
+    // 尺寸必须讲清楚：模型看到的是缩放后的图，phone_tap 收的却是屏幕真实像素。
+    // 不说两个尺寸，模型就会把图上的坐标直接当屏幕坐标点下去——表现为连续几次点同一个错位置。
+    const size = s.w && s.h ? { w: s.w, h: s.h } : await this.phone.screenSize()
+    const sentW = s.sentW || 0
+    const sentH = s.sentH || 0
+    let tip = '已截图（手机当前画面）。'
+    if (size && size.w && size.h) {
+      const scale = sentW ? (size.w / sentW).toFixed(2) : ''
+      tip =
+        `已截图。手机屏幕实际像素 ${size.w}×${size.h}` +
+        (sentW && sentH ? `，你看到的图已缩到 ${sentW}×${sentH}` : '') +
+        '。\nphone_tap 要的是屏幕实际像素，不是图上的像素：把图上看到的坐标换算回去——' +
+        (scale
+          ? `x = 图上 x × ${scale}，y = 图上 y × ${scale}。`
+          : `x = 图上 x ÷ 图宽 × ${size.w}，y = 图上 y ÷ 图高 × ${size.h}。`)
+    }
+    return { __image: s.data, __mime: s.mime || 'image/png', __text: tip }
   }
 
   dispatch(name, args) {

@@ -44,6 +44,24 @@ function parseTexts(xml) {
   return [...new Set(texts)]
 }
 
+/**
+ * adb shell input text 只认 ASCII。
+ * 传中文时设备端 KeyCharacterMap 返回 null 数组，直接
+ * java.lang.NullPointerException: Attempt to get length of null array，
+ * 命令 exit 1、一个字都进不去，日志里还留一大段堆栈。
+ * 所以非 ASCII 一律在本地拦下来，别发给设备。
+ */
+const ASCII_ONLY = /^[\x20-\x7E]*$/
+
+/** 设备端 sh 会把 input text 的实参再解析一遍，用单引号包住，内部单引号按 '\'' 转义 */
+function shellArg(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`
+}
+
+/** 装了 ADBKeyBoard 时的输入法组件名（github.com/senzhk/ADBKeyBoard） */
+const ADB_KEYBOARD_PKG = 'com.android.adbkeyboard'
+const ADB_KEYBOARD_IME = 'com.android.adbkeyboard/.AdbIME'
+
 const VALID_STATES = new Set(['device', 'offline', 'unauthorized', 'recovery', 'sideload', 'bootloader', 'connecting'])
 
 class PhoneChannel {
@@ -196,6 +214,8 @@ class PhoneChannel {
     const ready = list.filter((d) => d.state === 'device')
     if (ready.length) {
       if (!this.preferred || !ready.some((d) => d.serial === this.preferred)) this.preferred = ready[0].serial
+      this._size = null // 可能换了设备，尺寸和输入法都得重查
+      this._hasKbd = undefined
       log.push(`已就绪设备：${ready.map((d) => d.serial).join('；')}`)
       // 无线没连上、但插着数据线的情况：说清楚，别让用户以为失败了
       if (/failed|refused|拒绝/i.test(out) && !ready.some((d) => d.serial === target)) {
@@ -296,15 +316,100 @@ class PhoneChannel {
   }
 
   async tap(x, y) {
-    await this.adb(['shell', 'input', 'tap', String(x), String(y)])
-    return `已点击 (${x},${y})`
+    const nx = Math.round(Number(x))
+    const ny = Math.round(Number(y))
+    if (!Number.isFinite(nx) || !Number.isFinite(ny)) {
+      return `点击未执行：坐标无效（${x},${y}），需要两个整数像素`
+    }
+    // 越界多半是模型把「截图缩放后的坐标」当成屏幕坐标了。先挡住，
+    // 否则 input tap 会静默点到一个不存在的点上，模型看不出失败、反复点同一处。
+    const { w, h } = await this.screenSize()
+    if (w && h && (nx < 0 || ny < 0 || nx >= w || ny >= h)) {
+      return (
+        `点击未执行：坐标 (${nx},${ny}) 超出屏幕范围。\n` +
+        `这台手机的屏幕实际像素是 ${w}×${h}，合法范围 x 0–${w - 1}、y 0–${h - 1}。\n` +
+        '若刚看过 phone_shot 的截图，请按返回里给的倍数把图上的位置换算成屏幕实际像素再点。'
+      )
+    }
+    await this.adb(['shell', 'input', 'tap', String(nx), String(ny)])
+    return `已点击 (${nx},${ny})` + (w ? `，屏幕 ${w}×${h}` : '')
   }
 
+  /**
+   * 输入文字。
+   * 中文等非 ASCII 走两条路：
+   *   1) 装了 ADBKeyBoard → 临时切到它、用 base64 广播上屏、再切回原输入法（无副作用）；
+   *   2) 没装 → 本地拦截并说明原因，绝不把中文塞给 adb。
+   */
   async type(text) {
-    // adb input text 不支持中文；纯 ASCII 直接输入，含中文时给出提示
-    const out = await this.adb(['shell', 'input', 'text', String(text).replace(/ /g, '%s')])
-    if (out) return `输入返回：${out}（若中文没上屏，需改用剪贴板方案）`
-    return `已输入：${text}`
+    const raw = String(text ?? '')
+    if (!raw) return '没有可输入的文字'
+
+    if (!ASCII_ONLY.test(raw) && (await this.hasAdbKeyboard())) {
+      const done = await this.typeViaAdbKeyboard(raw)
+      if (done) return done
+    }
+
+    if (!ASCII_ONLY.test(raw)) {
+      const bad = [...new Set(raw.split('').filter((c) => !/[\x20-\x7E]/.test(c)))].slice(0, 8).join('')
+      return [
+        `输入未执行：文字里有非 ASCII 字符「${bad}」。`,
+        'adb 自带的 input text 只支持英文、数字和半角符号，中文会让手机端直接抛',
+        'NullPointerException（日志里那条 Attempt to get length of null array 就是它），一个字都进不去。',
+        '可以这样处理：',
+        '1) 让用户自己手动敲这段文字，最稳；',
+        '2) 换个不需要中文输入的路径完成同样的事，比如用英文名、包名或拼音关键词搜索；',
+        '3) 用户在手机上装 ADBKeyBoard（github.com/senzhk/ADBKeyBoard）后重试，这个通道会自动改走广播，中文就能上屏。',
+      ].join('\n')
+    }
+
+    // 纯 ASCII：空格要写成 %s，其余字符靠单引号交给设备端 shell
+    const payload = raw.replace(/ /g, '%s')
+    const out = await this.adb(['shell', 'input', 'text', shellArg(payload)])
+    if (/Exception|Error|Unknown/i.test(out)) return `输入失败：${out}`
+    return `已输入：${raw}`
+  }
+
+  /** 手机里是否装了 ADBKeyBoard（结果缓存，避免每次都查包名） */
+  async hasAdbKeyboard() {
+    if (this._hasKbd !== undefined) return this._hasKbd
+    const s = await this.currentSerial()
+    if (!s) return false
+    const out = await this.adb(['shell', 'pm', 'list', 'packages'], { timeout: 25000 })
+    this._hasKbd = out.includes(ADB_KEYBOARD_PKG)
+    return this._hasKbd
+  }
+
+  /** 切到 ADBKeyBoard → base64 广播 → 切回原输入法 */
+  async typeViaAdbKeyboard(raw) {
+    const cur = (
+      await this.adb(['shell', 'settings', 'get', 'secure', 'default_input_method'], { timeout: 15000 })
+    ).trim()
+    await this.adb(['shell', 'ime', 'set', ADB_KEYBOARD_IME], { timeout: 15000 })
+    await sleep(350)
+    const b64 = Buffer.from(raw, 'utf8').toString('base64')
+    const out = await this.adb(
+      ['shell', 'am', 'broadcast', '-a', 'ADB_INPUT_B64', '--es', 'msg', b64],
+      { timeout: 15000 },
+    )
+    await sleep(350)
+    // 切回去，别把用户的系统输入法留在 ADBKeyBoard 上（那样手打中文会没键盘）
+    if (cur && /[./]/.test(cur) && !cur.includes('adbkeyboard')) {
+      await this.adb(['shell', 'ime', 'set', cur], { timeout: 15000 })
+    }
+    if (/Broadcast completed/i.test(out)) return `已输入：${raw}（经 ADBKeyBoard 广播）`
+    return null
+  }
+
+  /** 屏幕实际像素（Override size 优先——手动改过分辨率时 input 用的是这套坐标） */
+  async screenSize() {
+    const s = await this.currentSerial()
+    if (this._size && this._size.serial === s) return this._size
+    const out = await this.adb(['shell', 'wm', 'size'], { timeout: 15000 })
+    const m = out.match(/Override size:\s*(\d+)x(\d+)/i) || out.match(/Physical size:\s*(\d+)x(\d+)/i)
+    const size = { serial: s, w: m ? Number(m[1]) : 0, h: m ? Number(m[2]) : 0 }
+    if (size.w && size.h) this._size = size
+    return size
   }
 
   /**
@@ -340,11 +445,14 @@ class PhoneChannel {
     // 多次仍读不到：多半是图片界面 / 分身空间 App，直接上截图让模型看见画面
     const img = await this.screencap()
     if (img) {
+      const { w, h } = await this.screenSize()
       return {
         __image: img,
         __mime: 'image/png',
         __text:
-          '屏幕上看不到文字（界面可能是图片，或分身空间 App），已附当前截图，请直接看图判断界面内容与可点击位置，需要操作时给出真实像素坐标。',
+          '屏幕上看不到文字（界面可能是图片，或分身空间 App），已附当前截图' +
+          (w && h ? `，屏幕实际像素 ${w}×${h}` : '') +
+          '，请直接看图判断界面内容与可点击位置，需要操作时给出屏幕实际像素坐标。',
       }
     }
     return '屏幕上看不到文字（可能是图片界面，且截图也失败）'
