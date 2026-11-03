@@ -68,8 +68,6 @@
 | --- | --- |
 | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/connect-phone-dark.png"><img alt="连接手机" src="docs/connect-phone-light.png"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/web-agent-dark.png"><img alt="网页通道" src="docs/web-agent-light.png"></picture> |
 
-> 截图使用演示数据，人物、消息、IP、设备序列号均为虚构。每张图都做了浅色 / 深色两版，显示哪一版由你的系统主题决定。
-
 ---
 
 ## 快速开始
