@@ -8,15 +8,16 @@ const { PhoneChannel } = require('./phone')
 
 const SYSTEM = `你是一个运行在 Windows 桌面上的个人 AI 助理，有两套「手」：
 1) 网页通道（操作本机 Chrome）：web_navigate(url) 打开网址；web_read() 读页面可见文字；web_click(selector) 按 CSS 选择器点击；web_type(selector,text) 在输入框里打字。
-2) 手机通道（经 adb 操作已连的安卓手机）：phone_apps 查包名；phone_launch(app, user) 启动 App；phone_tap(x,y) 按屏幕实际像素点击；phone_type(text) 输入文字（只能英文数字半角符号）；phone_read() 读当前屏幕文字。
+2) 手机通道（经 adb 操作已连的安卓手机）：phone_apps 查包名；phone_launch(app, user) 启动 App；phone_tap(x,y) 按屏幕实际像素点击；phone_type(text) 往当前焦点输入框打字（中文也行——设备装了 ADBKeyBoard 时会自动切过去用广播上屏）；phone_read() 读当前屏幕文字。
 
 关于「双开 / 分身」App：国产手机的双开不是换包名，而是多用户空间——同一个 com.tencent.mm 在主空间是主微信，在 user 999 是分身微信。
 用户说「分身微信 / 双开微信 / 另一个微信」时，必须 phone_launch(app='com.tencent.mm', user=999)；说主微信时 user 省略（默认 0）。
 不确定有哪些空间时，先 phone_apps(keyword='tencent', user=999) 看分身空间里装了什么。
 phone_read 读不到文字（返回「屏幕上看不到文字」）时——分身空间 App 就属于这种——改用 phone_shot 截图直接看屏幕，再按图上的位置点。
 phone_shot 返回里会写明「手机屏幕实际像素」和「你看到的图已缩到多少」，两个尺寸不一样时按它给的倍数换算成屏幕像素再点，不要把图上的坐标直接当屏幕坐标。
-要给某人或某个群发一段文字（尤其是中文、或者在分身空间里），优先用 phone_send_text(text, user)：它把文字直接交给微信的分享面板，不点输入框、不经过输入法，中文照样能传。流程是 phone_send_text → 看附图点「发送给朋友」→ 在会话列表里点目标会话 → 确认发送。
-phone_type 只能保证「按键已注入」，不能保证「文字已上屏」，所以它每次都会附一张操作后的截图：必须看图确认输入框里真有字。如果它说这个空间没有输入法，就不要再用 phone_type，直接改用 phone_send_text。
+要「聊天」（发一句、看对方回、再回一句）就走打字这条路：先 phone_tap 点一下会话底部的输入框 → phone_type(text) 打字（中文一样能打）→ 看返回的截图确认输入框里真有字 → phone_tap 点发送 → phone_read（读不到就 phone_shot 看图）读对方回复，再接着回。
+phone_send_text 是一次性投递，不是聊天：它把文字交给系统分享面板，每发一条都要在面板里重新选一次会话，也读不到对方回复。只有这两种情况才用它：① 用户只要发一段固定文字、不需要来回对话；② phone_type 明确回报这个空间没有输入法、或注入后截图里是空的。
+phone_type 只能保证「命令下发成功」，不能保证「文字已上屏」：输入框没焦点时广播照样回成功，框里却一个字都没有。所以每次都要看它附的截图，没字就先点一下输入框再重打，绝不能把「已输入」当成已经发出去了。
 
 规则：
 - 每次只调用一个工具，看清结果再决定下一步；坐标按手机屏幕实际像素给。
@@ -105,7 +106,7 @@ const TOOLS = [
     function: {
       name: 'phone_type',
       description:
-        '向手机当前焦点输入框输入文字。只支持英文、数字、半角符号；中文等非 ASCII 字符会失败并返回处理建议。发消息请优先用 phone_send_text',
+        '向手机当前焦点输入框打字。支持中文——设备装了 ADBKeyBoard 时会自动切过去、用广播把字上屏（本机已装）。聊天/回消息走这条路：先 phone_tap 点一下输入框再打字，返回截图里要确认框里真有字',
       parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
     },
   },
@@ -114,7 +115,7 @@ const TOOLS = [
     function: {
       name: 'phone_send_text',
       description:
-        '把一段文字直接交给微信分享面板（走系统分享 Intent，不点输入框、不过输入法，中文照样能传）。给某人或某个群发一段固定文字时用它，比 phone_tap + phone_type 可靠',
+        '把一段文字直接交给系统分享面板（一次性投递：不经过输入框，中文必通，但每发一条都要在面板里重选会话，也读不到对方回复）。只在「只发一段固定文字、不需要对话」或「phone_type 明确报没有输入法/注入失败」时才用；要聊天请用 phone_tap 点输入框 + phone_type 打字',
       parameters: {
         type: 'object',
         properties: {
@@ -148,6 +149,26 @@ const TOOLS = [
     },
   },
 ]
+
+/**
+ * 清掉「悬空工具调用」：assistant 消息带 tool_calls 但对话里找不到对应 tool 结果时，
+ * 下一轮作为历史发给接口会直接 400（No tool output found for function call）。
+ * 典型来源：模型用 done() 收尾 —— assistant 消息带了一个 done 的 tool_call，但 done 不产生、
+ * 也不需要 tool 结果，必须把这条 tool_call 摘掉，否则同一会话下一次发言必崩。
+ */
+function stripDanglingToolCalls(messages) {
+  const toolIds = new Set(messages.filter((m) => m.role === 'tool').map((m) => m.tool_call_id))
+  return messages.map((m) => {
+    if (m.role !== 'assistant' || !Array.isArray(m.tool_calls) || m.tool_calls.length === 0) return m
+    const kept = m.tool_calls.filter((c) => toolIds.has(c.id))
+    if (kept.length === m.tool_calls.length) return m
+    if (kept.length === 0) {
+      const { tool_calls, ...rest } = m
+      return rest
+    }
+    return { ...m, tool_calls: kept }
+  })
+}
 
 class Agent {
   constructor({ llm, onLog = () => {}, web, phone, shot }) {
@@ -263,7 +284,8 @@ class Agent {
           const answer = String(args.answer || '完成')
           log(`完成：${answer}`)
           messages.push({ role: 'assistant', content: answer })
-          return { answer, messages }
+          // done 不会、也不需要产生 tool 结果：清掉它留下的悬空 tool_call，否则下一轮历史发给接口会 400
+          return { answer, messages: stripDanglingToolCalls(messages) }
         }
         let result
         try {
@@ -289,7 +311,7 @@ class Agent {
       }
     }
     log('（达到 20 步上限，先停下）')
-    return { answer: '', messages }
+    return { answer: '', messages: stripDanglingToolCalls(messages) }
   }
 
   async phoneShot() {

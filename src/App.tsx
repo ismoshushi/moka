@@ -61,6 +61,11 @@ function summarize(tn: Turn) {
     const err = tn.lines.find((l) => /^(出错|失败)/.test(l.trim()))
     return err ? err.trim().slice(0, 100) : '执行失败'
   }
+  // 还在跑：绝不能回落到「已完成」，否则折叠条会自相矛盾（左「已完成」右「运行中」）
+  if (tn.state === 'run') {
+    const steps = tn.lines.filter((l) => l.trim().startsWith('[')).length
+    return steps ? `执行中（${steps} 步）` : '执行中…'
+  }
   const last = [...tn.lines].reverse().find((l) => {
     const t = l.trim()
     return t && !t.startsWith('[') && !t.startsWith('（') && !t.startsWith('——')

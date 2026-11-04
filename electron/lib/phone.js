@@ -357,9 +357,15 @@ class PhoneChannel {
       )
     }
 
-    if (!ASCII_ONLY.test(raw) && (await this.hasAdbKeyboard())) {
+    // 只要装了 ADBKeyBoard 就一律走广播，纯英文也不交给 input text。
+    // 原因：adb 的 input text 投的是"按键"，默认输入法若是中文拼音模式，
+    // "mo club" 会被当成拼音组词（候选栏出「摸club」），输入框里留的是没提交的
+    // 上屏区文字，一确认就变成中文——搜 "mo club" 自然搜不到。
+    // 广播走 commitText，字面照搬，中英文都稳。
+    if (await this.hasAdbKeyboard()) {
       const done = await this.typeViaAdbKeyboard(raw)
-      if (done) return this.tipAfterType(done)
+      // 「未执行」不能套那句"按键已注入"的说明，否则前后自相矛盾
+      if (done) return done.startsWith('打字未执行') ? done : this.tipAfterType(done)
     }
 
     if (!ASCII_ONLY.test(raw)) {
@@ -465,8 +471,32 @@ class PhoneChannel {
     return this._hasKbd
   }
 
+  /**
+   * 当前界面有没有活的输入连接。
+   * ADBKeyBoard 靠 commitText 上屏，没有输入连接时广播照样回 result=0，字却进不去，
+   * 所以打中文前必须先确认这个。读不到该字段时返回 null（宁可放行，不要误拦）。
+   */
+  async hasInputConnection() {
+    const out = await this.adb(['shell', 'dumpsys', 'input_method'], { timeout: 20000 })
+    // 回到桌面 / 界面上根本没有输入框时，系统会把客户端整个卸掉：mCurClient=null，
+    // 而且干脆不打印 mServedInputConnection 这一行——所以不能只看后者。
+    const clients = [...out.matchAll(/mCurClient=(\S+)/g)].map((m) => m[1])
+    if (clients.length && clients.every((c) => c === 'null')) return false
+    const m = out.match(/mServedInputConnection=(null|\S+)/)
+    if (!m) return null
+    return m[1] !== 'null'
+  }
+
   /** 切到 ADBKeyBoard → base64 广播 → 切回原输入法 */
   async typeViaAdbKeyboard(raw) {
+    const connected = await this.hasInputConnection()
+    if (connected === false) {
+      return (
+        '打字未执行：当前界面没有输入框焦点（输入法还没连上任何输入框），' +
+        '这时候广播打进去也是一片空白。\n' +
+        '先用 phone_tap 点一下要输入的那个输入框，等键盘弹出来，再调 phone_type。'
+      )
+    }
     const cur = (
       await this.adb(['shell', 'settings', 'get', 'secure', 'default_input_method'], { timeout: 15000 })
     ).trim()
